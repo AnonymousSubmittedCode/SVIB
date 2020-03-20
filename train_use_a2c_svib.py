@@ -52,14 +52,14 @@ class Model_A2C_SVIB(object):
         train_model = policy(sess, ob_space, ac_space, nbatch, master_ts, worker_ts, cell = cell, M=sv_M, model='train_model', algo=algo)
         print('model_setting_done, algorithm:', str(algo))
 
-        ib_loss = train_model.mi_xh_loss
-        T = train_model.T_value
-        t_grads, t_global_norm = grad_clip(-vf_coef*ib_loss, max_grad_norm, ['model/T/update_params'])
-        t_trainer = tf.train.RMSPropOptimizer(learning_rate=LR, decay=alpha, epsilon=epsilon)
-        _t_train = t_trainer.apply_gradients(t_grads)
-        T_update_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='model/T/update_params')
-        T_orig_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='model/T/orig_params')
-        reset_update_params = [update_param.assign(orig_param) for update_param, orig_param in zip(T_update_params, T_orig_params)]
+#         ib_loss = train_model.mi_xh_loss
+#         T = train_model.T_value
+#         t_grads, t_global_norm = grad_clip(-vf_coef*ib_loss, max_grad_norm, ['model/T/update_params'])
+#         t_trainer = tf.train.RMSPropOptimizer(learning_rate=LR, decay=alpha, epsilon=epsilon)
+#         _t_train = t_trainer.apply_gradients(t_grads)
+#         T_update_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='model/T/update_params')
+#         T_orig_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='model/T/orig_params')
+#         reset_update_params = [update_param.assign(orig_param) for update_param, orig_param in zip(T_update_params, T_orig_params)]
 
         if algo == 'use_svib_uniform' or algo == 'use_svib_gaussian':
             def expand_placeholder(X, M=sv_M):
@@ -168,18 +168,18 @@ class Model_A2C_SVIB(object):
                 represent_loss = 0.
             return tloss, value_loss, policy_loss, policy_entropy, rl_grad_norm, repr_grad_norm, represent_loss#SV_GRAD, EXPLOIT, LOG_P_GRADS, EXPLORE
 
-        def train_mine(wobs, whs, steps=256, lr=7e-4):
-            # whs_std = (whs-np.mean(whs,axis=0,keepdims=True))/(1e-8 + np.std(whs,axis=0,keepdims=True))
-            idx = np.arange(len(whs))
-            ___ = sess.run(reset_update_params)
-            for i in range(int(steps)):
-                np.random.shuffle(idx)
-                mi, T_value, __ = sess.run([ib_loss, T, _t_train],
-                                           feed_dict={train_model.wX: wobs[idx], train_model.wh: whs[idx],
-                                                      LR: lr, train_model.istraining: True})
-            logger.record_tabular('mutual_info_loss', float(mi))
-            logger.record_tabular('T_value', float(T_value))
-            logger.dump_tabular()
+#         def train_mine(wobs, whs, steps=256, lr=7e-4):
+#             # whs_std = (whs-np.mean(whs,axis=0,keepdims=True))/(1e-8 + np.std(whs,axis=0,keepdims=True))
+#             idx = np.arange(len(whs))
+#             ___ = sess.run(reset_update_params)
+#             for i in range(int(steps)):
+#                 np.random.shuffle(idx)
+#                 mi, T_value, __ = sess.run([ib_loss, T, _t_train],
+#                                            feed_dict={train_model.wX: wobs[idx], train_model.wh: whs[idx],
+#                                                       LR: lr, train_model.istraining: True})
+#             logger.record_tabular('mutual_info_loss', float(mi))
+#             logger.record_tabular('T_value', float(T_value))
+#             logger.dump_tabular()
 
         def save(save_path):
             ps = sess.run(params)
@@ -194,7 +194,7 @@ class Model_A2C_SVIB(object):
             ps = sess.run(restores)
 
         self.train = train
-        self.train_mine = train_mine
+#         self.train_mine = train_mine
         self.train_model = train_model
         self.step_model = step_model
         self.get_wh = step_model.get_wh
