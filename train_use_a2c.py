@@ -23,9 +23,12 @@ import seaborn as sns
 from utils import grad_clip, explained_variance
 from policy import CnnPolicy
 ds = tf.contrib.distributions
+# os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
 start_time = datetime.datetime.now().strftime("%Y%m%d%H%M")
 env_name = "MoveToBeaconNoFrameskip-v1"
+# gpu_options = tf.GPUOptions(allow_growth=True)
+# sess = tf.Session(config=tf.ConfigProto(gpu_options=gpu_options))
 
 class Model(object):
 
@@ -34,7 +37,9 @@ class Model(object):
             alpha=0.99, epsilon=1e-5, total_timesteps=int(80e6), lrschedule='linear',
             algo='regular', beta=1e-3):
 
-        sess = tf_util.make_session()
+        print('Create Session')
+        gpu_options = tf.GPUOptions(allow_growth=True)
+        sess = tf.Session(config=tf.ConfigProto(gpu_options=gpu_options))
         nact = ac_space.n
         nbatch = nenvs*master_ts*worker_ts
 
@@ -53,6 +58,7 @@ class Model(object):
         vf_loss = tf.reduce_mean(mse(tf.squeeze(train_model.wvf), R))
         entropy = tf.reduce_mean(cat_entropy(train_model.wpi))
         pg_loss = pg_loss - entropy * ent_coef
+        print('algo: ', algo, 'max_grad_norm: ', str(max_grad_norm))
         try:
             if algo == 'regular':
                 loss = pg_loss + vf_coef * vf_loss
@@ -159,8 +165,14 @@ def learn(policy, env, test_env, seed, master_ts = 1, worker_ts = 8, cell = 256,
     ob_space = env.observation_space
     ac_space = env.action_space
     print(str(nenvs)+"------------"+str(ob_space)+"-----------"+str(ac_space))
+    max_grad_norm_tune = max_grad_norm
+    max_grad_norm_tune_env_list = ['BreakoutNoFrameskip-v4', 'MsPacmanNoFrameskip-v4']
+    global  env_name
+    if env_name in max_grad_norm_tune_env_list:
+        print('tune max grad norm')
+        max_grad_norm_tune = 1.0
     model = Model(policy = policy, ob_space = ob_space, ac_space = ac_space, nenvs = nenvs, master_ts=master_ts, worker_ts=worker_ts,
-                  ent_coef = ent_coef, vf_coef = vf_coef, max_grad_norm = max_grad_norm, lr = lr, cell = cell,
+                  ent_coef = ent_coef, vf_coef = vf_coef, max_grad_norm = max_grad_norm_tune, lr = lr, cell = cell,
                   alpha = alpha, epsilon = epsilon, total_timesteps = total_timesteps, lrschedule = lrschedule,
                   algo=algo, beta=beta)
     try:
@@ -203,7 +215,7 @@ def learn(policy, env, test_env, seed, master_ts = 1, worker_ts = 8, cell = 256,
 
 def train(env_id, num_timesteps, seed, policy, lrschedule, num_env,load_path,
           algo='regular', beta=1e-3):
-    if policy == 'cnn':
+    if policy == 'cnn_svib':
         policy_fn = CnnPolicy
     else:
         policy_fn = CnnPolicy
@@ -211,12 +223,12 @@ def train(env_id, num_timesteps, seed, policy, lrschedule, num_env,load_path,
     test_env = VecFrameStack(make_atari_env(env_id, num_env, seed+1), 4)
     reward_list = learn(policy_fn, env, test_env, seed, total_timesteps=int(num_timesteps),
                         lrschedule=lrschedule, load_path=load_path, algo=algo, beta=beta)
-    env.close()
+    # env.close()
     return reward_list
 
 def config_log(FLAGS):
-    logdir = "tensorboard/%s/a2c/%s_lr%s_%s/%s_%s" % (
-        FLAGS.env,FLAGS.num_timesteps, '0.0007',FLAGS.policy, start_time, str(FLAGS.beta))
+    logdir = "tensorboard/%s/hrl_a2c_svib/%s_lr%s_%s/%s_%s_%s" % (
+        FLAGS.env,FLAGS.num_timesteps, '0.0007',FLAGS.policy, start_time, FLAGS.train_option, str(FLAGS.beta))
     if FLAGS.log == "tensorboard":
         Logger.DEFAULT = Logger.CURRENT = Logger(dir=logdir, output_formats=[TensorBoardOutputFormat(logdir)])
     elif FLAGS.log == "stdout":
@@ -245,11 +257,11 @@ def train_all(algos, env_id, num_timesteps, seed, policy, lrschedule, num_env, l
 def main():
     global env_name
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--env', help='environment ID', default='AirRaidNoFrameskip-v4')
+    parser.add_argument('--env', help='environment ID', default='AsteroidsNoFrameskip-v4')
     parser.add_argument('--num_env', help='number of environments', type=int, default=5)
     parser.add_argument('--seed', help='RNG seed', type=int, default=42)
     parser.add_argument('--num_timesteps', type=int, default=int(14e6))
-    parser.add_argument('--policy', help='Policy architecture', choices=['cnn', 'lstm'], default='cnn')
+    parser.add_argument('--policy', help='Policy architecture', choices=['cnn_svib', 'lstm'], default='cnn_svib')
     parser.add_argument('--train_option', help='which algorithm do we train',
                         choices=['regular', 'compare_with_regular', 'VIB'],
                         default='VIB')

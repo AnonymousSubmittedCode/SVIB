@@ -1341,6 +1341,7 @@ class CnnPolicySVIB(object):
         channels = 1
         stddev = 0.1
         wX = tf.placeholder(tf.uint8, [nbatch, nh, nw, nc])#worker obs
+        wX_shuffle = tf.placeholder(tf.uint8, [nbatch, nh, nw, nc])
         istraining = tf.placeholder(tf.bool, shape=[])
         NOISE_KEEP = tf.placeholder(tf.float32, shape=[nbatch, 20, 20, channels])
         noise = tf.random_normal(shape=[nbatch, 20, 20, channels], stddev=stddev)
@@ -1425,37 +1426,45 @@ class CnnPolicySVIB(object):
                 self.rpf_matrix = rpf_matrix
                 self.rpf_grads = rpf_grads
 
-                # def T(X, H, scope='T', reuse=reuse):
-                #     with tf.variable_scope(scope, reuse=reuse):
-                #         with tf.variable_scope('update_params'):
-                #             tx1 = tf.nn.elu(conv(X, 'tx1', nf=16, rf=8, stride=4, init_scale=np.sqrt(2)))
-                #             tx2 = tf.nn.elu(conv(tx1, 'tx2', nf=32, rf=4, stride=2, init_scale=np.sqrt(2)))
-                #             tx3 = tf.nn.elu(conv(tx2, 'tx3', nf=64, rf=3, stride=2, init_scale=np.sqrt(2)))
-                #             tx3_flatten = conv_to_fc(tx3)
-                #             w_tx = tf.get_variable('w_tx', [1024, cell], initializer=ortho_init(np.sqrt(2)))
-                #             w_th = tf.get_variable('w_th', [cell, cell], initializer=ortho_init(np.sqrt(2.)))
-                #             w_tb = tf.get_variable('w_tb', [cell], initializer=tf.constant_initializer(0.0))
-                #             t1 = tf.nn.elu(tf.matmul(tx3_flatten, w_tx) + tf.matmul(H, w_th) + w_tb)
-                #             t2 = tf.nn.elu(
-                #                 tf.layers.batch_normalization(fc(t1, 't2', nh=cell), training=istraining, name='tbn2'))
-                #             t3 = fc(t2, 't3', nh=1)
-                #         with tf.variable_scope('orig_params'):
-                #             otx1 = tf.nn.elu(conv(X, 'otx1', nf=16, rf=8, stride=4, init_scale=np.sqrt(2)))
-                #             otx2 = tf.nn.elu(conv(otx1, 'otx2', nf=32, rf=4, stride=2, init_scale=np.sqrt(2)))
-                #             otx3 = tf.nn.elu(conv(otx2, 'otx3', nf=64, rf=3, stride=2, init_scale=np.sqrt(2)))
-                #             otx3_flatten = conv_to_fc(otx3)
-                #             ow_tx = tf.get_variable('ow_tx', [1024, cell], initializer=ortho_init(np.sqrt(2)))
-                #             ow_th = tf.get_variable('ow_th', [cell, cell], initializer=ortho_init(np.sqrt(2.)))
-                #             ow_tb = tf.get_variable('ow_tb', [cell], initializer=tf.constant_initializer(0.0))
-                #             ot1 = tf.nn.elu(tf.matmul(otx3_flatten, ow_tx) + tf.matmul(H, ow_th) + ow_tb)
-                #             ot2 = tf.nn.elu(tf.layers.batch_normalization(fc(ot1, 'ot2', nh=cell), training=istraining,
-                #                                                           name='otbn2'))
-                #             ot3 = fc(ot2, 'ot3', nh=1)
-                #     return t3
+                def T(X, H, scope='T', reuse=reuse):
+                    with tf.variable_scope(scope, reuse=reuse):
+                        with tf.variable_scope('update_params'):
+                            tx1 = tf.nn.elu(conv(X, 'tx1', nf=16, rf=8, stride=4, init_scale=np.sqrt(2)))
+                            tx2 = tf.nn.elu(conv(tx1, 'tx2', nf=32, rf=4, stride=2, init_scale=np.sqrt(2)))
+                            tx3 = tf.nn.elu(conv(tx2, 'tx3', nf=64, rf=3, stride=2, init_scale=np.sqrt(2)))
+                            tx3_flatten = conv_to_fc(tx3)
+                            w_tx = tf.get_variable('w_tx', [1024, cell], initializer=ortho_init(np.sqrt(2)))
+                            w_th = tf.get_variable('w_th', [cell, cell], initializer=ortho_init(np.sqrt(2.)))
+                            w_tb = tf.get_variable('w_tb', [cell], initializer=tf.constant_initializer(0.0))
+                            t1 = tf.nn.elu(tf.matmul(tx3_flatten, w_tx) + tf.matmul(H, w_th) + w_tb)
+                            t2 = tf.nn.elu(
+                                tf.layers.batch_normalization(fc(t1, 't2', nh=cell), training=istraining, name='tbn2'))
+                            t3 = fc(t2, 't3', nh=1)
+                        with tf.variable_scope('orig_params'):
+                            otx1 = tf.nn.elu(conv(X, 'otx1', nf=16, rf=8, stride=4, init_scale=np.sqrt(2)))
+                            otx2 = tf.nn.elu(conv(otx1, 'otx2', nf=32, rf=4, stride=2, init_scale=np.sqrt(2)))
+                            otx3 = tf.nn.elu(conv(otx2, 'otx3', nf=64, rf=3, stride=2, init_scale=np.sqrt(2)))
+                            otx3_flatten = conv_to_fc(otx3)
+                            ow_tx = tf.get_variable('ow_tx', [1024, cell], initializer=ortho_init(np.sqrt(2)))
+                            ow_th = tf.get_variable('ow_th', [cell, cell], initializer=ortho_init(np.sqrt(2.)))
+                            ow_tb = tf.get_variable('ow_tb', [cell], initializer=tf.constant_initializer(0.0))
+                            ot1 = tf.nn.elu(tf.matmul(otx3_flatten, ow_tx) + tf.matmul(H, ow_th) + ow_tb)
+                            ot2 = tf.nn.elu(tf.layers.batch_normalization(fc(ot1, 'ot2', nh=cell), training=istraining,
+                                                                          name='otbn2'))
+                            ot3 = fc(ot2, 'ot3', nh=1)
+                    return t3
+
+                wX_shuffle_ = tf.cast(wX_shuffle, tf.float32) / 255.
+                wh_shuffle = encoder(wX_shuffle_, noise)
 
                 # idx = tf.reshape(tf.range(start=0, limit=wh.get_shape()[0].value, dtype=tf.int32), [-1, 1])
                 # idx_shuffle = tf.random_shuffle(idx)
                 # wh_shuffle = tf.gather_nd(wh, indices=idx_shuffle)
+
+                # t_eta, et_eta = T(wX_, wh), tf.exp(T(wX_, wh_shuffle))
+                t, et = T(wX_, wh), tf.exp(T(wX_, wh_shuffle))
+                self.t, self.et = t, et
+                self.wh_shuffle = wh_shuffle
                 # joint_T, marginal_T = T(wX_, wh), tf.exp(T(wX_, wh_shuffle))
                 # self.mi_xh_loss = tf.reduce_mean(joint_T) - tf.log(
                 #     tf.reduce_mean(marginal_T))  # mutual information between X and wh
@@ -1490,6 +1499,7 @@ class CnnPolicySVIB(object):
             return sess.run(noise)
 
         self.wX = wX
+        self.wX_shuffle = wX_shuffle
         self.istraining = istraining
         self.NOISE_KEEP = NOISE_KEEP
         self.noise = noise

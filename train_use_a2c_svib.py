@@ -31,11 +31,13 @@ from policy import CnnPolicySVIB
 
 start_time = datetime.datetime.now().strftime("%Y%m%d%H%M")
 env_name = "MoveToBeaconNoFrameskip-v1"
+gpu_options = tf.GPUOptions(allow_growth=True)
+sess = tf.Session(config=tf.ConfigProto(gpu_options=gpu_options))
 
 class Model_A2C_SVIB(object):
 
     def __init__(self, policy, ob_space, ac_space, nenvs, master_ts = 1, worker_ts = 8,
-                 ent_coef=0.01, vf_coef=0.5, max_grad_norm=0.5, lr=7e-4, cell=256,
+                 ent_coef=0.01, vf_coef=0.5, max_grad_norm=1.0, lr=7e-4, cell=256,
                  ib_alpha=0.04, sv_M=32, algo='use_svib_uniform', clip_stein_explore_part=True,
                  alpha=0.99, epsilon=1e-5, total_timesteps=int(80e6), lrschedule='linear'):
 
@@ -52,14 +54,13 @@ class Model_A2C_SVIB(object):
         train_model = policy(sess, ob_space, ac_space, nbatch, master_ts, worker_ts, cell = cell, M=sv_M, model='train_model', algo=algo)
         print('model_setting_done, algorithm:', str(algo))
 
-#         ib_loss = train_model.mi_xh_loss
-#         T = train_model.T_value
-#         t_grads, t_global_norm = grad_clip(-vf_coef*ib_loss, max_grad_norm, ['model/T/update_params'])
-#         t_trainer = tf.train.RMSPropOptimizer(learning_rate=LR, decay=alpha, epsilon=epsilon)
-#         _t_train = t_trainer.apply_gradients(t_grads)
-#         T_update_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='model/T/update_params')
-#         T_orig_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='model/T/orig_params')
-#         reset_update_params = [update_param.assign(orig_param) for update_param, orig_param in zip(T_update_params, T_orig_params)]
+        # mi_est = tf.reduce_mean(train_model.t) - tf.log(tf.reduce_mean(train_model.et))
+        # t_grads, t_global_norm = grad_clip(-vf_coef*mi_est, max_grad_norm, ['model/T/update_params'])
+        # t_trainer = tf.train.RMSPropOptimizer(learning_rate=LR, decay=alpha, epsilon=epsilon)
+        # _t_train = t_trainer.apply_gradients(t_grads)
+        # T_update_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='model/T/update_params')
+        # T_orig_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='model/T/orig_params')
+        # reset_update_params = [update_param.assign(orig_param) for update_param, orig_param in zip(T_update_params, T_orig_params)]
 
         if algo == 'use_svib_uniform' or algo == 'use_svib_gaussian':
             def expand_placeholder(X, M=sv_M):
@@ -88,7 +89,7 @@ class Model_A2C_SVIB(object):
             for i in range(sv_M):
                 exploit = tf.reduce_sum(train_model.rpf_matrix[:, :, i:i+1] * log_p_grads, axis=1)
                 explore = train_model.rpf_grads[:, i, :]
-                print('clip_stein_explore_part:', clip_stein_explore_part)
+                # print('clip_stein_explore_part:', clip_stein_explore_part)
                 if clip_stein_explore_part:
                     clip_coef = tf_l2norm(exploit, axis=-1, keep_dims=True)
                     explore_norm = tf_l2norm(explore, axis=-1, keep_dims=True)
@@ -114,6 +115,27 @@ class Model_A2C_SVIB(object):
             repr_grads, repr_global_norm = grad_clip(repr_loss, max_grad_norm, ['model/ordinary_encoder'])
             repr_trainer = tf.train.RMSPropOptimizer(learning_rate=LR, decay=alpha, epsilon=epsilon)
             _repr_train = repr_trainer.apply_gradients(repr_grads)
+        elif algo == 'MINE_IB':
+            neglogpac = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=train_model.wpi, labels=A)
+            pg_loss = tf.reduce_mean(ADV * neglogpac)
+            entropy = tf.reduce_mean(cat_entropy(train_model.wpi))
+            vf_loss = tf.reduce_mean(mse(tf.squeeze(train_model.wvf), R))
+
+            MINE_loss = -ib_alpha*(tf.reduce_mean(train_model.t) - tf.log(tf.reduce_mean(train_model.et)))
+            MI_lower_bound = tf.reduce_mean(train_model.t) - tf.log(tf.reduce_mean(train_model.et))
+            loss = pg_loss + vf_coef * vf_loss - ent_coef * entropy + ib_alpha * MI_lower_bound
+
+            m_grads, m_global_norm = grad_clip(MINE_loss, max_grad_norm, ['model/T/update_params'])
+            m_trainer = tf.train.RMSPropOptimizer(learning_rate=LR, decay=alpha, epsilon=epsilon)
+            m__train = m_trainer.apply_gradients(m_grads)
+            grads, global_norm = grad_clip(loss, max_grad_norm, ['model/worker_module', 'model/ordinary_encoder'])
+            trainer = tf.train.RMSPropOptimizer(learning_rate=LR, decay=alpha, epsilon=epsilon)
+            _train = trainer.apply_gradients(grads)
+
+            # T_update_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='model/T/update_params')
+            # T_orig_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='model/T/orig_params')
+            # reset_update_params = [update_param.assign(orig_param) for update_param, orig_param in
+            #                        zip(T_update_params, T_orig_params)]
         else:
             neglogpac = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=train_model.wpi, labels=A)
             pg_loss = tf.reduce_mean(ADV * neglogpac)
@@ -151,11 +173,28 @@ class Model_A2C_SVIB(object):
                     feed_dict=rl_td_map
                 )
                 repr_td_map[SV_GRADS] = sv_gradients
+                mloss = 0.
                 # if algo == 'use_svib_gaussian':
                 #     gaussian_gradients, repr_grad_norm, __ =\
                 #         sess.run([gaussian_grad, repr_global_norm, _repr_train], feed_dict=repr_td_map)
                 #     return tloss, value_loss, policy_loss, policy_entropy, rl_grad_norm, gaussian_gradients, repr_grad_norm  # represnet_loss, SV_GRAD, EXPLOIT, LOG_P_GRADS, EXPLORE
                 repr_grad_norm, represent_loss, __ = sess.run([repr_global_norm, repr_loss, _repr_train], feed_dict=repr_td_map)
+            elif algo == 'MINE_IB':
+                rl_td_map[train_model.wX], rl_td_map[train_model.noise] = wobs, noises#noise won't be used when algo is 'regular'
+                index = range(noises.shape[0])
+                for i in range(5):
+                    marginal_index = np.random.choice(index, size=noises.shape[0], replace=False)
+                    rl_td_map[train_model.wX_shuffle] = wobs[marginal_index]
+                    mloss, __ = sess.run([MINE_loss, m__train], feed_dict=rl_td_map)
+                mloss = -mloss/ib_alpha
+                marginal_index = np.random.choice(index, size=noises.shape[0], replace=False)
+                rl_td_map[train_model.wX_shuffle] = wobs[marginal_index]
+                tloss, value_loss, policy_loss, policy_entropy, rl_grad_norm, _ = sess.run(
+                    [loss, vf_loss, pg_loss, entropy, global_norm, _train],
+                    feed_dict=rl_td_map
+                )
+                repr_grad_norm = 0.
+                represent_loss = 0.
             else:
                 rl_td_map[train_model.wX], rl_td_map[train_model.noise] = wobs, noises#noise won't be used when algo is 'regular'
                 tloss, value_loss, policy_loss, policy_entropy, rl_grad_norm, _ = sess.run(
@@ -166,20 +205,22 @@ class Model_A2C_SVIB(object):
                 # repr_grad_norm, __ = sess.run([ordin_repr_global_norm, _ordin_repr_train], feed_dict=repr_td_map)
                 repr_grad_norm = 0.
                 represent_loss = 0.
-            return tloss, value_loss, policy_loss, policy_entropy, rl_grad_norm, repr_grad_norm, represent_loss#SV_GRAD, EXPLOIT, LOG_P_GRADS, EXPLORE
+                mloss = 0.
+            rl_grad_norm = np.sqrt(np.square(rl_grad_norm)+np.square(repr_grad_norm))
+            return tloss, value_loss, policy_loss, policy_entropy, rl_grad_norm, repr_grad_norm, represent_loss, mloss#SV_GRAD, EXPLOIT, LOG_P_GRADS, EXPLORE
 
-#         def train_mine(wobs, whs, steps=256, lr=7e-4):
-#             # whs_std = (whs-np.mean(whs,axis=0,keepdims=True))/(1e-8 + np.std(whs,axis=0,keepdims=True))
-#             idx = np.arange(len(whs))
-#             ___ = sess.run(reset_update_params)
-#             for i in range(int(steps)):
-#                 np.random.shuffle(idx)
-#                 mi, T_value, __ = sess.run([ib_loss, T, _t_train],
-#                                            feed_dict={train_model.wX: wobs[idx], train_model.wh: whs[idx],
-#                                                       LR: lr, train_model.istraining: True})
-#             logger.record_tabular('mutual_info_loss', float(mi))
-#             logger.record_tabular('T_value', float(T_value))
-#             logger.dump_tabular()
+        # def train_mine(wobs, whs, steps=256, lr=7e-4):
+        #     # whs_std = (whs-np.mean(whs,axis=0,keepdims=True))/(1e-8 + np.std(whs,axis=0,keepdims=True))
+        #     idx = np.arange(whs.shape[0])
+        #     ___ = sess.run(reset_update_params)
+        #     for i in range(int(steps)):
+        #         np.random.shuffle(idx)
+        #         mi, __ = sess.run([mi_est, _t_train],
+        #                                    feed_dict={train_model.wX: wobs, train_model.wh:whs,
+        #                                               LR: lr, train_model.istraining: True})
+        #     logger.record_tabular('MI_estimation', float(mi))
+        #     # logger.record_tabular('T_value', float(T_value))
+        #     logger.dump_tabular()
 
         def save(save_path):
             ps = sess.run(params)
@@ -194,7 +235,7 @@ class Model_A2C_SVIB(object):
             ps = sess.run(restores)
 
         self.train = train
-#         self.train_mine = train_mine
+        # self.train_mine = train_mine
         self.train_model = train_model
         self.step_model = step_model
         self.get_wh = step_model.get_wh
@@ -245,6 +286,13 @@ def learn(policy, env, test_env, seed, master_ts = 1, worker_ts = 8, cell = 256,
     ob_space = env.observation_space
     ac_space = env.action_space
     print(str(nenvs)+"------------"+str(ob_space)+"-----------"+str(ac_space))
+    global env_name
+    if env_name == 'SpaceInvadersNoFrameskip-v4':
+        max_grad_norm = 1/1.414
+    elif env_name in ['BreakoutNoFrameskip-v4', 'MsPacmanNoFrameskip-v4']:
+        max_grad_norm =1.
+    else:
+        max_grad_norm = max_grad_norm
     model = Model_A2C_SVIB(policy = policy, ob_space = ob_space, ac_space = ac_space, nenvs = nenvs, master_ts=master_ts, worker_ts=worker_ts,
                            ent_coef = ent_coef, vf_coef = vf_coef, max_grad_norm = max_grad_norm, lr = lr, cell = cell,
                            ib_alpha = ib_alpha, sv_M = sv_M, algo=algo, clip_stein_explore_part=clip_stein_explore_part,
@@ -274,7 +322,7 @@ def learn(policy, env, test_env, seed, master_ts = 1, worker_ts = 8, cell = 256,
         #     # print(gaussian_gradients[0, 3:5, 0:30])
         #     # print('1')
         # else:
-        tloss, value_loss, policy_loss, policy_entropy, rl_grad_norm, repr_grad_norm, represent_loss = \
+        tloss, value_loss, policy_loss, policy_entropy, rl_grad_norm, repr_grad_norm, represent_loss, mloss = \
             model.train(b_obs, b_whs, states, b_rewards, b_wmasks, b_actions, b_values, b_noises)
         # print('b_whs:', b_whs[0, 0:60])
         # print('sv_grad:',SV_GRAD[0, 0:40])
@@ -294,6 +342,7 @@ def learn(policy, env, test_env, seed, master_ts = 1, worker_ts = 8, cell = 256,
             logger.record_tabular('repr_grad_norm', float(repr_grad_norm))
             logger.record_tabular('rl_grad_norm', float(rl_grad_norm))
             logger.record_tabular('repr_loss', float(represent_loss))
+            logger.record_tabular('MINE_loss', float(mloss))
             # if algo == 'use_svib_gaussian':
             #     logger.record_tabular('gaussian_grad_norm_without_clip', float(np.mean(np.abs(gaussian_gradients[0]))))
             # logger.record_tabular('represent_loss', float(represent_loss))
@@ -354,8 +403,8 @@ def train(env_id, num_timesteps, seed, policy, lrschedule, num_env,load_path,
     return reward_list
 
 def config_log(FLAGS):
-    logdir = "tensorboard/%s/hrl_a2c_svib/%s_lr%s_%s/%s_%s" % (
-        FLAGS.env,FLAGS.num_timesteps, '0.0007',FLAGS.policy, start_time, str(FLAGS.ib_alpha))
+    logdir = "tensorboard/%s/hrl_a2c_svib/%s_lr%s_%s/%s_%s_%s" % (
+        FLAGS.env,FLAGS.num_timesteps, '0.0007',FLAGS.policy, start_time, str(FLAGS.train_option), str(FLAGS.ib_alpha))
     if FLAGS.log == "tensorboard":
         Logger.DEFAULT = Logger.CURRENT = Logger(dir=logdir, output_formats=[TensorBoardOutputFormat(logdir)])
     elif FLAGS.log == "stdout":
@@ -384,19 +433,19 @@ def train_all(algos, env_id, num_timesteps, seed, policy, lrschedule, num_env, l
 def main():
     global env_name
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--env', help='environment ID', default='BreakoutNoFrameskip-v4')
+    parser.add_argument('--env', help='environment ID', default='QbertNoFrameskip-v4')
     parser.add_argument('--num_env', help='number of environments', type=int, default=5)
     parser.add_argument('--seed', help='RNG seed', type=int, default=42)
     parser.add_argument('--num_timesteps', type=int, default=int(14e6))
     parser.add_argument('--policy', help='Policy architecture', choices=['cnn_svib', 'lstm_svib'], default='cnn_svib')
     parser.add_argument('--train_option', help='which algorithm do we train',
-                        choices=['compare_with_regular', 'compare_with_none', 'uniform', 'gaussian', 'regular', 'regular_with_noise'],
-                        default='compare_with_regular')
+                        choices=['compare_with_regular', 'compare_with_none', 'uniform', 'gaussian', 'regular', 'regular_with_noise', 'MINE_IB'],
+                        default='MINE_IB')
     parser.add_argument('--lrschedule', help='Learning rate schedule', choices=['constant', 'linear', 'double_linear_con'], default='double_linear_con')
     parser.add_argument('--log', help='logging type', choices=['tensorboard', 'st dout'], default='tensorboard')
     parser.add_argument('--great_time', help='the time gets great result:%Y%m%d%H%M', default=202008291101)#default='201904181134')
     parser.add_argument('--great_th', help='the timeth gets great result', default=45)
-    parser.add_argument('--ib_alpha', type=float, default=.6e-3)
+    parser.add_argument('--ib_alpha', type=float, default=1e-3)
     parser.add_argument('--clip_stein_explore_part', help='whether clip the explore part of the stein variational gradient', type=bool, default=False)
     args = parser.parse_args()
     config_log(args)
@@ -413,21 +462,30 @@ def main():
                         policy=args.policy, lrschedule=args.lrschedule, num_env=args.num_env, load_path=load_path,
                         clip_stein_explore_part=args.clip_stein_explore_part)
     elif args.train_option == 'uniform':
-        all = train(env_id=args.env, num_timesteps=args.num_timesteps, seed=args.seed, policy=args.policy,
-                    lrschedule=args.lrschedule, num_env=args.num_env, load_path=load_path, algo='use_svib_uniform',
-                    ib_alpha=args.ib_alpha, clip_stein_explore_part=args.clip_stein_explore_part)
+        algos = {'use_svib_uniform': args.ib_alpha}
+        all = train_all(algos=algos, env_id=args.env, num_timesteps=args.num_timesteps, seed=args.seed,
+                        policy=args.policy, lrschedule=args.lrschedule, num_env=args.num_env, load_path=load_path,
+                        clip_stein_explore_part=args.clip_stein_explore_part)
     elif args.train_option == 'gaussian':
-        all = train(env_id=args.env, num_timesteps=args.num_timesteps, seed=args.seed, policy=args.policy,
-                    lrschedule=args.lrschedule, num_env=args.num_env, load_path=load_path, algo='use_svib_gaussian',
-                    ib_alpha=args.ib_alpha, clip_stein_explore_part=args.clip_stein_explore_part)
+        algos = {'use_svib_gaussian': args.ib_alpha}
+        all = train_all(algos=algos, env_id=args.env, num_timesteps=args.num_timesteps, seed=args.seed,
+                        policy=args.policy, lrschedule=args.lrschedule, num_env=args.num_env, load_path=load_path,
+                        clip_stein_explore_part=args.clip_stein_explore_part)
+    elif args.train_option == 'MINE_IB':
+        algos = {'MINE_IB': args.ib_alpha}
+        all = train_all(algos=algos, env_id=args.env, num_timesteps=args.num_timesteps, seed=args.seed,
+                        policy=args.policy, lrschedule=args.lrschedule, num_env=args.num_env, load_path=load_path,
+                        clip_stein_explore_part=args.clip_stein_explore_part)
     elif args.train_option == 'regular':
-        all = train(env_id=args.env, num_timesteps=args.num_timesteps, seed=args.seed, policy=args.policy,
-                    lrschedule=args.lrschedule, num_env=args.num_env, load_path=load_path, algo='regular',
-                    ib_alpha=args.ib_alpha, clip_stein_explore_part=args.clip_stein_explore_part)
+        algos = {'regular': args.ib_alpha}
+        all = train_all(algos=algos, env_id=args.env, num_timesteps=args.num_timesteps, seed=args.seed,
+                        policy=args.policy, lrschedule=args.lrschedule, num_env=args.num_env, load_path=load_path,
+                        clip_stein_explore_part=args.clip_stein_explore_part)
     else:
-        all = train(env_id=args.env, num_timesteps=args.num_timesteps, seed=args.seed, policy=args.policy,
-                    lrschedule=args.lrschedule, num_env=args.num_env, load_path=load_path, algo='regular_with_noise',
-                    ib_alpha=args.ib_alpha, clip_stein_explore_part=args.clip_stein_explore_part)
+        algos = {'regular_with_noise': args.ib_alpha}
+        all = train_all(algos=algos, env_id=args.env, num_timesteps=args.num_timesteps, seed=args.seed,
+                        policy=args.policy, lrschedule=args.lrschedule, num_env=args.num_env, load_path=load_path,
+                        clip_stein_explore_part=args.clip_stein_explore_part)
     return all
 
 if __name__ == "__main__":
