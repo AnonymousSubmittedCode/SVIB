@@ -206,7 +206,6 @@ class Model_A2C_SVIB(object):
                 repr_grad_norm = 0.
                 represent_loss = 0.
                 mloss = 0.
-            rl_grad_norm = np.sqrt(np.square(rl_grad_norm)+np.square(repr_grad_norm))
             return tloss, value_loss, policy_loss, policy_entropy, rl_grad_norm, repr_grad_norm, represent_loss, mloss#SV_GRAD, EXPLOIT, LOG_P_GRADS, EXPLORE
 
         # def train_mine(wobs, whs, steps=256, lr=7e-4):

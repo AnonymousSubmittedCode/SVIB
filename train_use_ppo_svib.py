@@ -29,6 +29,8 @@ import seaborn as sns
 
 start_time = datetime.datetime.now().strftime("%Y%m%d%H%M")
 env_name = "BreakoutNoFrameskip-v1"
+gpu_options = tf.GPUOptions(allow_growth=True)
+sess = tf.Session(config=tf.ConfigProto(gpu_options=gpu_options))
 
 class Model(object):
     def __init__(self, *, policy, ob_space, ac_space, nbatch_act, nbatch_train,
@@ -86,9 +88,10 @@ class Model(object):
             explore_coef = 1.
             if env_name == 'SeaquestNoFrameskip-v4':
                 explore_coef = 0.01
-            elif env_name == 'AirRaidNoFrameskip-v4':
+            elif env_name in ['AirRaidNoFrameskip-v4,''BreakoutNoFrameskip-v4', 'AtlantisNoFrameskip-v4',
+                              'StarGunnerNoFrameskip-v4', 'AsteroidsNoFrameskip-v4', 'YarsRevengeNoFrameskip-v4']:
                 explore_coef = 0.
-            print('env_name:', env_name)
+            print('env_name:', env_name, 'explore_coef: ', explore_coef)
             for i in range(sv_M):
                 exploit = tf.reduce_sum(train_model.rpf_matrix[:, :, i:i + 1] * log_p_grads, axis=1)
                 explore = np.sqrt(ib_alpha)*explore_coef*train_model.rpf_grads[:, i, :]
@@ -115,13 +118,14 @@ class Model(object):
             # explore = explore * 1e-2 * clip_coef / tf.maximum(explore_norm, clip_coef)
             # sv_grad = exploit + np.sqrt(ib_alpha) * explore  # shape=[nbatch, cell]
 
-            grads_expand, global_norm_expand = grad_clip(loss_expand, max_grad_norm, ['model/worker_module'])
+            grads_expand, grad_norm_expand = grad_clip(loss_expand, max_grad_norm, ['model/worker_module'])
             trainer_expand = tf.train.AdamOptimizer(learning_rate=LR, epsilon=1e-5)
             _train_expand = trainer_expand.apply_gradients(grads_expand)
             repr_grads, repr_global_norm = grad_clip(repr_loss, max_grad_norm, ['model/ordinary_encoder'])
             repr_trainer = tf.train.AdamOptimizer(learning_rate=LR, epsilon=1e-5)
             _repr_train = repr_trainer.apply_gradients(repr_grads)
         else:
+            print('env_name:', env_name)
             neglogpac = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=train_model.wpi, labels=A)
             entropy = tf.reduce_mean(cat_entropy(train_model.wpi))
             vpred = train_model.wvf[:,0]
@@ -135,7 +139,7 @@ class Model(object):
             pg_loss = tf.reduce_mean(tf.maximum(pg_losses, pg_losses2))
             loss = pg_loss - entropy * ent_coef + vf_loss * vf_coef
 
-            grads, _grad_norm = grad_clip(loss, max_grad_norm, ['model/worker_module', 'model/ordinary_encoder'])
+            grads, grad_norm = grad_clip(loss, max_grad_norm, ['model/worker_module', 'model/ordinary_encoder'])
             trainer = tf.train.AdamOptimizer(learning_rate=LR, epsilon=1e-5)
             _train = trainer.apply_gradients(grads)
 
@@ -177,8 +181,8 @@ class Model(object):
             if algo == 'use_svib_uniform' or algo == 'use_svib_gaussian':
                 sv_gradients, whs_expand, ir_ratio = sess.run([sv_grads, train_model.wh_expand, exploit_explore_ratio], feed_dict=repr_td_map)
                 rl_td_map[OLDNEGLOGPAC_expand], rl_td_map[OLDVPRED_expand], rl_td_map[train_model.wh_expand] = neglogpacs_expand, vpreds_expand, whs_expand
-                value_loss, policy_loss, policy_entropy, _ = sess.run(
-                    [vf_loss_expand_, pg_loss_expand_, entropy_expand_, _train_expand],
+                value_loss, policy_loss, policy_entropy, _, rl_grad_norm = sess.run(
+                    [vf_loss_expand_, pg_loss_expand_, entropy_expand_, _train_expand, grad_norm_expand],
                     feed_dict=rl_td_map
                 )
                 repr_td_map[SV_GRADS] = sv_gradients
@@ -186,13 +190,13 @@ class Model(object):
             else:
                 rl_td_map[train_model.wX], rl_td_map[train_model.noise] = obs, noises#noise won't be used when algo is 'regular'
                 rl_td_map[OLDNEGLOGPAC], rl_td_map[OLDVPRED], rl_td_map[ADV] = neglogpacs, values, advs
-                value_loss, policy_loss, policy_entropy, _ = sess.run(
-                    [ vf_loss, pg_loss, entropy,  _train],
+                value_loss, policy_loss, policy_entropy, _, rl_grad_norm = sess.run(
+                    [ vf_loss, pg_loss, entropy,  _train, grad_norm],
                     feed_dict=rl_td_map
                 )
-                represent_loss, rpf_norm_, rpf_grad_norm_, sv_gradients, ir_ratio = 0., 0., 0., 0., 0
-            return policy_loss, value_loss, policy_entropy, represent_loss, ir_ratio
-        self.loss_names = ['policy_loss', 'value_loss', 'policy_entropy', 'represent_loss', 'exploit_explore_ratio']
+                represent_loss, rpf_norm_, rpf_grad_norm_, sv_gradients, ir_ratio, repr_grad_norm = 0., 0., 0., 0., 0, 0.
+            return policy_loss, value_loss, policy_entropy, represent_loss, ir_ratio, rl_grad_norm, repr_grad_norm
+        self.loss_names = ['policy_loss', 'value_loss', 'policy_entropy', 'represent_loss', 'exploit_explore_ratio', 'rl_grad_norm', 'repr_grad_norm']
 
         def save(save_path):
             ps = sess.run(params)
@@ -464,7 +468,7 @@ def config_log(FLAGS):
 
 def train_all(algos, env_id, num_timesteps, seed, policy, num_env):
     all = pd.DataFrame([])
-    for i in range(3):
+    for i in range(1):
         for algo in algos.keys():
             ib_alpha = algos[algo]
             reward_list = np.reshape(train(env_id, num_env=num_env, num_timesteps=num_timesteps,
@@ -484,20 +488,20 @@ def train_all(algos, env_id, num_timesteps, seed, policy, num_env):
 def main():
     global env_name
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--env', help='environment ID', default='AirRaidNoFrameskip-v4')
+    parser.add_argument('--env', help='environment ID', default='CarnivalNoFrameskip-v4')
     parser.add_argument('--num_env', help='number of environments', type=int, default=5)
-    parser.add_argument('--seed', help='RNG seed', type=int, default=42)
+    parser.add_argument('--seed', help='RNG seed', type=int, default=44)
     parser.add_argument('--single_seed', help='single seed or multi-seeds?', type=bool, default=False)
     parser.add_argument('--num_timesteps', type=int, default=int(10e6))
     parser.add_argument('--policy', help='Policy architecture', choices=['cnn_svib'], default='cnn_svib')
     parser.add_argument('--train_option', help='which algorithm do we train',
                         choices=['compare_with_regular', 'compare_with_none', 'uniform', 'gaussian', 'regular_noise_uniform', 'regular_gaussian', 'regular'],
-                        default='regular')
+                        default='uniform')
     # parser.add_argument('--lrschedule', help='Learning rate schedule', choices=['constant', 'linear', 'double_linear_con'], default='double_linear_con')
     parser.add_argument('--log', help='logging type', choices=['tensorboard', 'stdout'], default='tensorboard')
     parser.add_argument('--great_time', help='the time gets great result:%Y%m%d%H%M', default=202008181728)#default='201904181134')
     parser.add_argument('--great_th', help='the timeth gets great result', default=73)
-    parser.add_argument('--ib_alpha', type=float, default=0.8)
+    parser.add_argument('--ib_alpha', type=float, default=1.6e-3)
     args = parser.parse_args()
     config_log(args)
     env_name = args.env
